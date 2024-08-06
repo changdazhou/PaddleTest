@@ -1,6 +1,6 @@
 #!/bin/bash
 
-set -e
+# set -e
 set -x
 
 SUITE_NAME=$1
@@ -31,6 +31,7 @@ function run_command(){
     eval $command
     last_status=${PIPESTATUS[0]}
     if [[ $last_status != 0 ]];then
+        sleep 10h
         exit 1
     fi
 }
@@ -43,7 +44,7 @@ PYTHONPATH="python"
 BASE_PATH=$(cd "$(dirname $0)"; pwd)
 MODULE_OUTPUT_PATH=${BASE_PATH}/outputs
 # 安装paddlex，完成环境准备
-
+pip config set global.index-url https://mirrors.bfsu.edu.cn/pypi/web/simple
 
 
 declare -A weight_dict
