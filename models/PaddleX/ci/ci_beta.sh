@@ -1,10 +1,14 @@
 #!/bin/bash
 
-set -e
+SUITE=$1
+NEW_MODEL_INFO_FILE=$2
+
 set -x
-
-SUITE_NAME=$1
-
+if [[ $SUITE != 'PaddleX' ]];then
+    set -e
+else
+    failed_model_info=""
+fi
 MEM_SIZE=16
 
 function func_parser_value(){
@@ -28,23 +32,115 @@ function run_command(){
     command=$1
     module_name=$2
     time_stamp=$(date +"%Y-%m-%d %H:%M:%S")
+    command="timeout 30m ${command}"
     printf "\e[32m|%-20s| %-20s | %-50s | %-20s\n\e[0m" "[${time_stamp}]" ${module_name} "Run ${command}"
     eval $command
     last_status=${PIPESTATUS[0]}
-    n=1
-    # Try 3 times to run command if it fails
-    while [[ $last_status != 0 ]]; do
-        sleep 10
-        n=`expr $n + 1`
-        printf "\e[32m|%-20s| %-20s | %-50s | %-20s\n\e[0m" "[${time_stamp}]" ${module_name} "Retrying $n times with comand: ${command}"
-        eval $command
-        last_status=${PIPESTATUS[0]}
-        if [[ $n -eq 3 && $last_status != 0 ]]; then
-            echo "Retry 3 times failed with comand: ${command}"
-            exit 1
+    if [[ $SUITE != 'PaddleX' ]];then
+        n=1
+        # Try 3 times to run command if it fails
+        while [[ $last_status != 0 ]]; do
+            sleep 10
+            n=`expr $n + 1`
+            printf "\e[32m|%-20s| %-20s | %-50s | %-20s\n\e[0m" "[${time_stamp}]" ${module_name} "Retrying $n times with command: ${command}"
+            eval $command
+            last_status=${PIPESTATUS[0]}
+            if [[ $n -eq 3 && $last_status != 0 ]]; then
+                echo "Retry 3 times failed with command: ${command}"
+                exit 1
+            fi
+        done
+    else
+        if [[ $last_status != 0 ]];then
+            failed_model_info="$failed_model_info \n ${module_name} | command: ${command}"
         fi
-    done
+    fi
     set -e
+}
+
+function prepare_dataset(){
+    download_dataset_cmd="${PYTHONPATH} ${BASE_PATH}/checker.py --download_dataset --config_path ${check_dataset_yaml} --dataset_url ${dataset_url}"
+    run_command ${download_dataset_cmd} ${module_name}
+    model_output_path=${MODULE_OUTPUT_PATH}/${module_name}_dataset_check
+    check_dataset_cmd="${PYTHONPATH} main.py -c ${check_dataset_yaml} -o Global.mode=check_dataset -o Global.output=${model_output_path} "
+    run_command ${check_dataset_cmd} ${module_name}
+    checker_cmd="${PYTHONPATH} ${BASE_PATH}/checker.py --check --check_dataset_result --output ${model_output_path} --module_name ${module_name}"
+    run_command ${checker_cmd} ${module_name}
+    dataset_dir=`cat $check_dataset_yaml | grep  -m 1 dataset_dir | awk  {'print$NF'}| sed 's/"//g'`
+    if [[ ! -z $train_list_name ]]; then
+        train_data_file=${dataset_dir}/${train_list_name}
+        mv $train_data_file $train_data_file.bak
+    fi
+}
+
+function run_models(){
+    config_files=$1
+    for config_path in $config_files;do
+        config_path=$(func_parser_value "${config_path}")
+        batch_size=`cat $config_path | grep  -m 1 batch_size | awk  {'print$NF'}`
+        device=`cat $config_path | grep  -m 1 device | awk  {'print$NF'}`
+        IFS=$','
+        device_list=(${device})
+        device_num=${#device_list[@]}
+        IFS=$' '
+        if [[ $MEM_SIZE -lt 16 ]];then
+            if [[ $batch_size -ge 4 ]];then
+                batch_size=`expr $batch_size / 4`
+            else
+                batch_size=1
+            fi
+        elif [[ $MEM_SIZE -lt 32 ]];then
+            if [[ $batch_size -ge 2 ]];then
+                batch_size=`expr $batch_size / 2`
+            else
+                batch_size=1
+            fi
+        fi
+        data_num=`expr $device_num \* $batch_size`
+        if [[ ! -z $train_data_file ]]; then
+            if [[ $module_name == ts* ]]; then
+                data_num=`expr $device_num \* $batch_size \* 30`
+                data_num=`expr $data_num + 1`
+            fi
+            head -n $data_num $train_data_file.bak > $train_data_file
+        fi
+        yaml_name=${config_path##*/}
+        model_name=${yaml_name%.*}
+        model_list="${model_list} ${model_name}"
+        model_output_path=${MODULE_OUTPUT_PATH}/${module_name}_output/${model_name}
+        evaluate_weight_path=${model_output_path}/${best_weight_path}
+        inference_weight_path=${model_output_path}/${inference_model_dir}
+        mkdir -p $model_output_path
+        IFS=$'|'
+        run_model_list=(${run_model})
+        for mode in ${run_model_list[@]};do
+            # 根据config运行各模型的train和evaluate
+            base_mode_cmd="${PYTHONPATH} main.py -c ${config_path} -o Global.mode=${mode} -o Train.epochs_iters=${epochs_iters} -o Train.batch_size=${batch_size} -o Evaluate.weight_path=${evaluate_weight_path} -o Predict.model_dir=${inference_weight_path}"
+            if [[ $mode == "export" ]];then
+                model_export_output_path=${model_output_path}/export
+                mkdir -p $model_export_output_path
+                weight_dict[$model_name]="$model_export_output_path"
+                run_mode_cmd="${base_mode_cmd} -o Global.output=${model_export_output_path}"
+            else
+                run_mode_cmd="${base_mode_cmd} -o Global.output=${model_output_path}"
+            fi
+            run_command ${run_mode_cmd} ${module_name}
+        done
+        check_options_list=(${check_options})
+        for check_option in ${check_options_list[@]};do
+            # 运行产出检查脚本
+            checker_cmd="${PYTHONPATH} ${BASE_PATH}/checker.py --check --$check_option --output ${model_output_path} --check_weights_items ${check_weights_items} --module_name ${module_name}"
+            run_command ${checker_cmd} ${module_name}
+        done
+    done
+    model_dict[$module_name]="$model_list"
+}
+
+function prepare_and_run(){
+    config_file_list=$1
+    echo $config_file_list
+    prepare_dataset
+    run_models "${config_file_list}"
 }
 
 
@@ -60,33 +156,37 @@ pip config set global.index-url https://mirrors.bfsu.edu.cn/pypi/web/simple
 declare -A weight_dict
 declare -A model_dict
 
-if [[ -z $SUITE_NAME ]]; then
+
+if [[ -z $SUITE ]]; then
+    install_deps_cmd="pip install -e . && paddlex --install -y"
     modules_info_file=${BASE_PATH}/PaddleX_simplify_models.txt
-    install_deps_cmd="pip install -e . && paddlex --install"
-elif [[ $SUITE_NAME == "PaddleX" ]]; then
-    modules_info_file=${BASE_PATH}/PaddleX_models.txt
-    install_deps_cmd="pip install -e . && paddlex --install"
+elif [[ $SUITE == "PaddleX" ]];then
+    install_deps_cmd="pip install -e . && paddlex --install -y"
+    modules_info_file=${BASE_PATH}/ci_info.txt
 else
-    install_deps_cmd="pip install -e . && paddlex --install --use_local_repos $SUITE_NAME"
-    modules_info_file=${BASE_PATH}/${SUITE_NAME}_models.txt
+    install_deps_cmd="pip install -e . && paddlex --install --use_local_repos $SUITE"
+    modules_info_file=${BASE_PATH}/PaddleX_simplify_models.txt
 fi
 eval ${install_deps_cmd}
 
 IFS='*'
 modules_info_list=($(cat ${modules_info_file}))
+all_module_names=`cat $modules_info_file | grep module_name | awk -F ':' {'print$2'}`
 
 unset http_proxy https_proxy
-
+IFS=$' '
 for modules_info in ${modules_info_list[@]}; do
     IFS='='
     model_list=''
     info_list=($modules_info)
     for module_info in ${info_list[@]}; do
-        IFS=$'\n'
         if [[ $module_info == *check_dataset_yaml* ]]; then
             # 数据准备，获取模型信息和运行模式
+            IFS=$'\n'
             lines=(${module_info})
             line_num=0
+            suite_name=$(func_parser_value "${lines[line_num]}")
+            line_num=`expr $line_num + 1`
             module_name=$(func_parser_value "${lines[line_num]}")
             line_num=`expr $line_num + 1`
             check_dataset_yaml=$(func_parser_value "${lines[line_num]}")
@@ -106,72 +206,38 @@ for modules_info in ${modules_info_list[@]}; do
             inference_model_dir=$(func_parser_value "${lines[line_num]}")
             line_num=`expr $line_num + 1`
             epochs_iters=$(func_parser_value "${lines[line_num]}")
-            download_dataset_cmd="${PYTHONPATH} ${BASE_PATH}/checker.py --download_dataset --config_path ${check_dataset_yaml} --dataset_url ${dataset_url}"
-            run_command ${download_dataset_cmd} ${module_name}
-            model_output_path=${MODULE_OUTPUT_PATH}/${module_name}_dataset_check
-            check_dataset_cmd="${PYTHONPATH} main.py -c ${check_dataset_yaml} -o Global.mode=check_dataset -o Global.output=${model_output_path} "
-            run_command ${check_dataset_cmd} ${module_name}
-            checker_cmd="${PYTHONPATH} ${BASE_PATH}/checker.py --check --check_dataset_result --output ${model_output_path} --module_name ${module_name}"
-            run_command ${checker_cmd} ${module_name}
-            dataset_dir=`cat $check_dataset_yaml | grep  -m 1 dataset_dir | awk  {'print$NF'}| sed 's/"//g'`
-            if [[ ! -z $train_list_name ]]; then
-                train_data_file=${dataset_dir}/${train_list_name}
-                mv $train_data_file $train_data_file.bak
+            if [[ $SUITE == "PaddleX" ]];then
+                if [[ ! -z $NEW_MODEL_INFO_FILE ]];then
+                    new_model_info=`cat $NEW_MODEL_INFO_FILE`
+                    new_model_module_names=`cat $NEW_MODEL_INFO_FILE | awk -F '/' {'print$3'} | sort -u`
+                    for new_module_info in ${new_model_module_names[@]};do
+                        set +e
+                        module=`echo "${all_module_names[@]}" | grep $new_module_info`
+                        set -e
+                        if [[ -z $module ]];then
+                            echo "new module: $new_module_info is unsupported! Please contact with the developer or add new module info in ci_info.txt!"
+                            exit 1
+                        fi
+                        if [[ $new_module_info == $module_name ]];then
+                            module_info=`cat $NEW_MODEL_INFO_FILE | grep $module_name | xargs -n1 -I {} echo config_path:{}`
+                            echo $module_info
+                            prepare_and_run "${module_info}"
+                        fi
+                    done
+                else
+                    module_info=`ls paddlex/configs/${module_name} | xargs -n1 -I {} echo config_path:paddlex/configs/${module_name}/{}`
+                    prepare_and_run "${module_info}"
+                fi
+                continue
             fi
-
         elif [[ ! -z $module_info ]]; then
-            for config_path in $module_info;do
-                config_path=$(func_parser_value "${config_path}")
-                batch_size=`cat $config_path | grep  -m 1 batch_size | awk  {'print$NF'}`
-                device=`cat $config_path | grep  -m 1 device | awk  {'print$NF'}`
-                IFS=$','
-                device_list=(${device})
-                device_num=${#device_list[@]}
-                IFS=$' '
-                if [[ $MEM_SIZE -lt 16 ]];then
-                    if [[ $batch_size -ge 4 ]];then
-                        batch_size=`expr $batch_size / 4`
-                    else
-                        batch_size=1
-                    fi
-                elif [[ $MEM_SIZE -lt 32 ]];then
-                    if [[ $batch_size -ge 2 ]];then
-                        batch_size=`expr $batch_size / 2`
-                    else
-                        batch_size=1
-                    fi
-                fi
-                data_num=`expr $device_num \* $batch_size`
-                if [[ ! -z $train_data_file ]]; then
-                    if [[ $module_name == ts* ]]; then
-                        data_num=`expr $device_num \* $batch_size \* 30`
-                        data_num=`expr $data_num + 1`
-                    fi
-                    head -n $data_num $train_data_file.bak > $train_data_file
-                fi
-                yaml_name=${config_path##*/}
-                model_name=${yaml_name%.*}
-                model_list="${model_list} ${model_name}"
-                model_output_path=${MODULE_OUTPUT_PATH}/${module_name}_output/${model_name}
-                evaluate_weight_path=${model_output_path}/${best_weight_path}
-                inference_weight_path=${model_output_path}/${inference_model_dir}
-                weight_dict[$model_name]="$inference_weight_path"
-                mkdir -p $model_output_path
-                IFS=$'|'
-                run_model_list=(${run_model})
-                for mode in ${run_model_list[@]};do
-                    # 根据config运行各模型的train和evaluate
-                    run_mode_cmd="${PYTHONPATH} main.py -c ${config_path} -o Global.mode=${mode} -o Global.output=${model_output_path} -o Train.epochs_iters=${epochs_iters} -o Train.batch_size=${batch_size} -o Evaluate.weight_path=${evaluate_weight_path} -o Predict.model_dir=${inference_weight_path}"
-                    run_command ${run_mode_cmd} ${module_name}
-                done
-                check_options_list=(${check_options})
-                for check_option in ${check_options_list[@]};do
-                    # 运行产出检查脚本
-                    checker_cmd="${PYTHONPATH} ${BASE_PATH}/checker.py --check --$check_option --output ${model_output_path} --check_weights_items ${check_weights_items} --module_name ${module_name}"
-                    run_command ${checker_cmd} ${module_name}
-                done
-            done
-            model_dict[$module_name]="$model_list"
+            if [[ ! -z $SUITE && $SUITE == $suite_name ]];then
+                prepare_and_run "${module_info}"
+            elif [[ -z $SUITE ]];then
+                prepare_and_run "${module_info}"
+            else
+                continue
+            fi
         fi
     done
 done
@@ -197,7 +263,7 @@ function check_pipeline() {
 	rm -rf $output_path
 	mkdir -p $output_path
 	cd $output_path
-	cmd="paddlex --pipeline ${pipeline} --model ${model} --model_dir ${model_dir} --input ${img} --device gpu:0"
+	cmd="timeout 30m paddlex --pipeline ${pipeline} --model ${model} --model_dir ${model_dir} --input ${img} --device gpu:0"
 	eval $cmd
     last_status=${PIPESTATUS[0]}
     if [[ $last_status != 0 ]];then
@@ -231,3 +297,8 @@ for (( i=0; i<$length; i++ ));do
 		done
 	fi
 done
+
+if [[ $SUITE == 'PaddleX' ]] && [[ ! -z $failed_model_info ]];then
+    echo $failed_model_info
+    exit 1
+fi

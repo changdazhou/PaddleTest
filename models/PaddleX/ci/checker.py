@@ -139,7 +139,7 @@ class PostTrainingChecker:
                 if not os.path.exists(os.path.join(output_dir, config_path)):
                     check_train_json_message.append(f"检查失败：配置文件 {config_path} 不存在")
                     pass_flag = False
-                if not ("text" in module_name or "table" in module_name):
+                if not ("text" in module_name or "table" in module_name or "formula" in module_name):
                     if not os.path.exists(os.path.join(output_dir, visualdl_log_path)):
                         check_train_json_message.append(f"检查失败：VisualDL日志文件 {visualdl_log_path} 不存在")
                         pass_flag = False
@@ -197,7 +197,8 @@ class PostTrainingChecker:
                 check_dataset_json_message.append("检查失败：未正确返回报错信息")
         # 检查config和visualdl_log字段对应的文件是否存在
         dataset_path = json_data.get("dataset_path")
-        if not os.path.exists(os.path.join(output_dir, dataset_path)):
+        # if not os.path.exists(os.path.join(output_dir, dataset_path)):
+        if not os.path.exists(dataset_path):
             check_dataset_json_message.append(f"检查失败：数据集路径 {dataset_path} 不存在")
             pass_flag = False
         if "ts" in module_name:
@@ -227,7 +228,7 @@ class PostTrainingChecker:
                     if not samples_path or not os.path.exists(sample_path):
                         check_dataset_json_message.append(f"检查失败：在 {samples_key} 中，{sample_path} 对应的文件不存在或为空")
                         pass_flag = False
-            if "text" not in module_name and "table" not in module_name:
+            if not ("text" in module_name or "table" in module_name or "formula" in module_name):
                 try:
                     num_class = int(json_data["attributes"].get("num_classes"))
                 except ValueError:
