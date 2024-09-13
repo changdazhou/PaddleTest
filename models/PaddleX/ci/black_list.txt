@@ -1,0 +1,4 @@
+train:
+evaluate:
+predict:PPYOLOE_Seg_Paddle,MaskRCNN-ResNet50,MaskRCNN-ResNet50-FPN,MaskRCNN-ResNet50-vd-FPN,MaskRCNN-ResNet101-FPN,MaskRCNN-ResNet101-vd-FPN,MaskRCNN-ResNeXt101-vd-FPN,MaskRCNN-ResNet50-vd-SSLDv2-FPN,Cascade-MaskRCNN-ResNet50-vd-SSLDv2-FPN,Cascade-MaskRCNN-ResNet50-FPN,Nonstationary_ad,TimesNet_ad,TimesNet_cls,PatchTST_ad,DLinear_ad,PP-YOLOE+_SOD-largesize-l,PP-YOLOE+_SOD-l,PP-YOLOE+_SOD-s,Cascade-FasterRCNN-ResNet50-vd-SSLDv2-FPN,Cascade-FasterRCNN-ResNet50-FPN,FasterRCNN-Swin-Tiny-FPN,FasterRCNN-ResNeXt101-vd-FPN,FasterRCNN-ResNet101-FPN,FasterRCNN-ResNet101,FasterRCNN-ResNet50-vd-SSLDv2-FPN,FasterRCNN-ResNet50-vd-FPN,FasterRCNN-ResNet50-FPN,FasterRCNN-ResNet50,FasterRCNN-ResNet34-FPN,
+export:

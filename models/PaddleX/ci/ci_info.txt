@@ -95,7 +95,7 @@ inference_weight_dir:best_model
 epochs_iters:2
 *********************************************************************************************************************
 suite_name:PaddleClas
-module_name:multilabel_classification
+module_name:multilabel_classification|export
 check_dataset_yaml:paddlex/configs/multilabel_classification/ResNet50_ML.yaml
 dataset_url:https://paddle-model-ecology.bj.bcebos.com/paddlex/PaddleX3.0/CI/dataset/mlcls_nus_examples.tar
 train_list_name:train.txt

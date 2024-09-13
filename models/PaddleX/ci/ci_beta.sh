@@ -2,6 +2,8 @@
 
 SUITE=$1
 NEW_MODEL_INFO_FILE=$2
+MEM_SIZE=16
+
 
 set -x
 if [[ $SUITE != 'PaddleX' ]];then
@@ -9,7 +11,11 @@ if [[ $SUITE != 'PaddleX' ]];then
 else
     failed_model_info=""
 fi
-MEM_SIZE=16
+
+
+
+
+#################################################### Functions ######################################################
 
 function func_parser_value(){
     strs=$1
@@ -27,6 +33,7 @@ function func_parser_dataset_url(){
     echo ${tmp}
 }
 
+# 运行命令并输出结果，PR级CI失败会重跑3次并异常退出，增量级和全量级会记录失败命令，最后打印失败的命令并异常退出
 function run_command(){
     set +e
     command=$1
@@ -53,11 +60,13 @@ function run_command(){
     else
         if [[ $last_status != 0 ]];then
             failed_model_info="$failed_model_info \n ${module_name} | command: ${command}"
+            echo "Run ${command} failed"
         fi
     fi
     set -e
 }
 
+# 准备数据集并做数据校验
 function prepare_dataset(){
     download_dataset_cmd="${PYTHONPATH} ${BASE_PATH}/checker.py --download_dataset --config_path ${check_dataset_yaml} --dataset_url ${dataset_url}"
     run_command ${download_dataset_cmd} ${module_name}
@@ -73,6 +82,7 @@ function prepare_dataset(){
     fi
 }
 
+# 对给定的模型列表运行模型相应的train和evaluate等操作
 function run_models(){
     config_files=$1
     for config_path in $config_files;do
@@ -83,6 +93,7 @@ function run_models(){
         device_list=(${device})
         device_num=${#device_list[@]}
         IFS=$' '
+        # 根据内存大小调整batch_size
         if [[ $MEM_SIZE -lt 16 ]];then
             if [[ $batch_size -ge 4 ]];then
                 batch_size=`expr $batch_size / 4`
@@ -96,13 +107,14 @@ function run_models(){
                 batch_size=1
             fi
         fi
+        # 根据batch_size和device_num调整数据集的数量
         data_num=`expr $device_num \* $batch_size`
         if [[ ! -z $train_data_file ]]; then
             if [[ $module_name == ts* ]]; then
                 data_num=`expr $device_num \* $batch_size \* 30`
                 data_num=`expr $data_num + 1`
             fi
-            head -n $data_num $train_data_file.bak > $train_data_file
+            # head -n $data_num $train_data_file.bak > $train_data_file
         fi
         yaml_name=${config_path##*/}
         model_name=${yaml_name%.*}
@@ -114,7 +126,15 @@ function run_models(){
         IFS=$'|'
         run_model_list=(${run_model})
         for mode in ${run_model_list[@]};do
-            # 根据config运行各模型的train和evaluate
+            set +e
+            black_model=`eval echo '$'"${mode}_black_list"|grep "${model_name},"`
+            set -e
+            if [[ ! -z $black_model ]];then
+                # 黑名单模型，不运行
+                echo "$model_name is in ${mode}_black_list, so skip it."
+                continue
+            fi
+            # 适配导出模型时，需要指定输出路径
             base_mode_cmd="${PYTHONPATH} main.py -c ${config_path} -o Global.mode=${mode} -o Train.epochs_iters=${epochs_iters} -o Train.batch_size=${batch_size} -o Evaluate.weight_path=${evaluate_weight_path} -o Predict.model_dir=${inference_weight_path}"
             if [[ $mode == "export" ]];then
                 model_export_output_path=${model_output_path}/export
@@ -125,6 +145,11 @@ function run_models(){
                 run_mode_cmd="${base_mode_cmd} -o Global.output=${model_output_path}"
             fi
             run_command ${run_mode_cmd} ${module_name}
+            # 在predict模式下，再次验证官方模型预测
+            if [[ $mode == "predict" ]];then
+                offcial_model_predict_cmd="${PYTHONPATH} main.py -c ${config_path} -o Global.mode=${mode} -o Predict.model_dir=None -o Global.output=${model_output_path}_offical_predict"
+                run_command ${offcial_model_predict_cmd} ${module_name}
+            fi
         done
         check_options_list=(${check_options})
         for check_option in ${check_options_list[@]};do
@@ -136,6 +161,7 @@ function run_models(){
     model_dict[$module_name]="$model_list"
 }
 
+# 准备数据集和运行模型
 function prepare_and_run(){
     config_file_list=$1
     echo $config_file_list
@@ -144,19 +170,24 @@ function prepare_and_run(){
 }
 
 
-#################################################### test_model ######################################################
-# 获取python的绝对路径
+#################################################### PaddleX CI ######################################################
+# PaddleX CI 区分为 PR 级、套件级、全量级和增量级
+# PR 级：运行 PaddleX_simplify_models.txt 中的重点模型列表
+# 套件级：运行 PaddleX_simplify_models.txt 中指定套件的部分模型
+# 全量级：根据 ci_info.txt 抓取 PaddleX 支持的所有模型并测试
+# 增量级：根据 ci_info.txt 和 传入的 changed_yaml.txt 抓取新增的模型，对新增模型进行增量测试
+
+
+# 指定 python
 PYTHONPATH="python"
 # 获取当前脚本的绝对路径，获得基准目录
 BASE_PATH=$(cd "$(dirname $0)"; pwd)
 MODULE_OUTPUT_PATH=${BASE_PATH}/outputs
-# 安装paddlex，完成环境准备
 pip config set global.index-url https://mirrors.bfsu.edu.cn/pypi/web/simple
-
 declare -A weight_dict
 declare -A model_dict
 
-
+# 安装paddlex，完成环境准备
 if [[ -z $SUITE ]]; then
     install_deps_cmd="pip install -e . && paddlex --install -y"
     modules_info_file=${BASE_PATH}/PaddleX_simplify_models.txt
@@ -167,7 +198,31 @@ else
     install_deps_cmd="pip install -e . && paddlex --install --use_local_repos $SUITE"
     modules_info_file=${BASE_PATH}/PaddleX_simplify_models.txt
 fi
+
 eval ${install_deps_cmd}
+
+
+#################################################### 模型级测试 ######################################################
+
+IFS=$' '
+black_list_file=${BASE_PATH}/black_list.txt
+black_list=`cat ${black_list_file}`
+IFS=$'\n'
+lines=(${black_list})
+line_num=0
+train_black_list=$(func_parser_value "${lines[line_num]}")
+line_num=`expr $line_num + 1`
+evaluate_black_list=$(func_parser_value "${lines[line_num]}")
+line_num=`expr $line_num + 1`
+predict_black_list=$(func_parser_value "${lines[line_num]}")
+line_num=`expr $line_num + 1`
+export_black_list=$(func_parser_value "${lines[line_num]}")
+echo "----------------------- Black list info ------------------------"
+echo "train_black_list: $train_black_list"
+echo "evaluate_black_list: $evaluate_black_list"
+echo "predict_black_list: $predict_black_list"
+echo "export_black_list: $export_black_list"
+echo "-----------------------------------------------------------------"
 
 IFS='*'
 modules_info_list=($(cat ${modules_info_file}))
@@ -242,7 +297,7 @@ for modules_info in ${modules_info_list[@]}; do
     done
 done
 
-#################################################### test_pipeline ######################################################
+#################################################### 产线级测试 ######################################################
 PIPELINE='image_classification instance_segmentation object_detection OCR semantic_segmentation'
 DEMO_IMG='general_image_classification_001.jpg general_instance_segmentation_004.png general_object_detection_002.png general_ocr_002.png  general_semantic_segmentation_002.png'
 BASE_URL='https://paddle-model-ecology.bj.bcebos.com/paddlex/imgs/demo_image/'
@@ -292,6 +347,14 @@ for (( i=0; i<$length; i++ ));do
 	else
 		IFS=' '
 		for model in $models;do
+            set +e
+            black_model=`echo $predict_black_list|grep "${model},"`
+            set -e
+            if [[ ! -z $black_model ]];then
+                # 黑名单模型，不运行
+                echo "$model is in $predict_black_list, so skip it."
+                continue
+            fi
             model_dir=${weight_dict[$model]}
 			check_pipeline $pipeline_name $model $model_dir $image
 		done
